@@ -48,14 +48,6 @@ struct mipi_dbi_pico_pio_config {
 
 	/* Reset GPIO */
 	const struct gpio_dt_spec reset;
-
-#if MIPI_DBI_8_BIT_MODE
-	/* Data GPIO remap look-up table. Valid if mipi_dbi_pico_pio_data.single_port is set */
-	const uint32_t data_lut[256];
-
-	/* Mask of all data pins. Valid if mipi_dbi_pico_pio_data.single_port is set */
-	const uint32_t data_mask;
-#endif
 };
 
 struct mipi_dbi_pico_pio_data {
@@ -64,14 +56,6 @@ struct mipi_dbi_pico_pio_data {
 	size_t pio_sm_thirdbit;
 	size_t pio_sm_otherbits;
 	struct k_mutex lock;
-
-#if MIPI_DBI_8_BIT_MODE
-	/* Indicates whether all data GPIO pins are on the same port and the data LUT is used. */
-	bool single_port;
-
-	/* Data GPIO port device. Valid if mipi_dbi_pico_pio_data.single_port is set */
-	const struct device *data_port;
-#endif
 };
 
 #if 0
@@ -104,10 +88,10 @@ RPI_PICO_PIO_DEFINE_PROGRAM(otherbits, 0, 4,
 );
 #else
 RPI_PICO_PIO_DEFINE_PROGRAM(parallel_8bit, 9, 13,
-	0x20c4, //  0: wait   1 irq, 4
-	0x81a0, //  1: pull   block                  [1]
-	0x7002, //  2: out    pins, 2         side 0
-	0x1800, //  3: jmp    0               side 1
+	0x38c4, //  0: wait   1 irq, 4	      side 1
+	0x91a0, //  1: pull   block           side 0 [1]
+	0x6002, //  2: out    pins, 2
+	0x0000, //  3: jmp    0
 	0x20c4, //  4: wait   1 irq, 4
 	0x80a0, //  5: pull   block
 	0x6062, //  6: out    null, 2
@@ -215,23 +199,6 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 	return 0;
 }
 
-static inline void mipi_dbi_pico_pio_set_data_gpios(const struct mipi_dbi_pico_pio_config *config,
-						   struct mipi_dbi_pico_pio_data *data,
-						   uint32_t value)
-{
-#if MIPI_DBI_8_BIT_MODE
-	if (data->single_port) {
-		gpio_port_set_masked(data->data_port, config->data_mask, config->data_lut[value]);
-	} else {
-#endif
-		for (int i = 0; i < config->data_bus_width; i++) {
-			gpio_pin_set_dt(&config->data[i], (value & (1 << i)) != 0);
-		}
-#if MIPI_DBI_8_BIT_MODE
-	}
-#endif
-}
-
 static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 					 const struct mipi_dbi_config *dbi_config, bool cmd_present,
 					 uint8_t cmd, const uint8_t *data_buf, size_t len)
@@ -252,10 +219,7 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 	case MIPI_DBI_MODE_8080_BUS_16_BIT:
 		gpio_pin_set_dt(&config->cs, 1);
 		if (cmd_present) {
-			// gpio_pin_set_dt(&config->wr, 0);
 			gpio_pin_set_dt(&config->cmd_data, 0);
-			// mipi_dbi_pico_pio_set_data_gpios(config, data, cmd);
-			// gpio_pin_set_dt(&config->wr, 1);
 			pio_sm_put_blocking(data->pio,data->pio_sm_firsttwobits, (uint32_t)cmd);
 			pio_sm_put_blocking(data->pio,data->pio_sm_thirdbit, (uint32_t)cmd);
 			pio_sm_put_blocking(data->pio,data->pio_sm_otherbits, (uint32_t)cmd);
@@ -270,8 +234,6 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 
 			while (len > 0) {
 				value = *(data_buf++);
-				// value = value == 0b11001001 ? 0x0 : 0b11001001;
-				// value = value == 0xff ? 0x0 : 0xff;
 				pio_sm_put_blocking(data->pio,data->pio_sm_firsttwobits, (uint32_t)value);
 				pio_sm_put_blocking(data->pio,data->pio_sm_thirdbit, (uint32_t)value);
 				pio_sm_put_blocking(data->pio,data->pio_sm_otherbits, (uint32_t)value);
@@ -290,7 +252,7 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 		if (cmd_present) {
 			gpio_pin_set_dt(&config->e, 1);
 			gpio_pin_set_dt(&config->cmd_data, 0);
-			mipi_dbi_pico_pio_set_data_gpios(config, data, cmd);
+			// mipi_dbi_pico_pio_set_data_gpios(config, data, cmd);
 			gpio_pin_set_dt(&config->e, 0);
 		}
 		if (len > 0) {
@@ -298,7 +260,7 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 			while (len > 0) {
 				value = *(data_buf++);
 				gpio_pin_set_dt(&config->e, 1);
-				mipi_dbi_pico_pio_set_data_gpios(config, data, value);
+				// mipi_dbi_pico_pio_set_data_gpios(config, data, value);
 				gpio_pin_set_dt(&config->e, 0);
 				len--;
 			}
@@ -357,6 +319,8 @@ static int mipi_dbi_pico_pio_init(const struct device *dev)
 	struct mipi_dbi_pico_pio_data *data = dev->data;
 #endif
 
+	mipi_dbi_pio_configure(config, data, 1);
+
 	if (gpio_is_ready_dt(&config->cmd_data)) {
 		ret = gpio_pin_configure_dt(&config->cmd_data, GPIO_OUTPUT_ACTIVE);
 		if (ret < 0) {
@@ -369,14 +333,6 @@ static int mipi_dbi_pico_pio_init(const struct device *dev)
 		gpio_pin_configure_dt(&config->rd, GPIO_OUTPUT_ACTIVE);
 		/* Don't emit an error because this pin is unused in type A */
 		gpio_pin_set_dt(&config->rd, 1);
-	}
-	if (gpio_is_ready_dt(&config->wr)) {
-		ret = gpio_pin_configure_dt(&config->wr, GPIO_OUTPUT_ACTIVE);
-		if (ret < 0) {
-			failed_pin = "wr";
-			goto fail;
-		}
-		gpio_pin_set_dt(&config->wr, 1);
 	}
 	if (gpio_is_ready_dt(&config->e)) {
 		gpio_pin_configure_dt(&config->e, GPIO_OUTPUT_ACTIVE);
@@ -399,38 +355,6 @@ static int mipi_dbi_pico_pio_init(const struct device *dev)
 		}
 		gpio_pin_set_dt(&config->reset, 0);
 	}
-	for (int i = 0; i < config->data_bus_width; i++) {
-		if (gpio_is_ready_dt(&config->data[i])) {
-			ret = gpio_pin_configure_dt(&config->data[i], GPIO_OUTPUT_ACTIVE);
-			if (ret < 0) {
-				failed_pin = "data";
-				goto fail;
-			}
-			gpio_pin_set_dt(&config->data[i], 0);
-		}
-	}
-
-#if MIPI_DBI_8_BIT_MODE
-	/* To optimize performance, we test whether all the data pins are
-	 * on the same port. If they are, we can set the whole port in one go
-	 * instead of setting each pin individually.
-	 * For 8-bit mode only because LUT size grows exponentially.
-	 */
-	if (config->data_bus_width == 8) {
-		data->single_port = true;
-		data->data_port = config->data[0].port;
-		for (int i = 1; i < config->data_bus_width; i++) {
-			if (data->data_port != config->data[i].port) {
-				data->single_port = false;
-			}
-		}
-	}
-	if (data->single_port) {
-		LOG_DBG("LUT optimization enabled. data_mask=0x%x", config->data_mask);
-	}
-#endif
-
-	mipi_dbi_pio_configure(config, data, 80);
 
 	return ret;
 fail:
@@ -443,35 +367,6 @@ static const struct mipi_dbi_driver_api mipi_dbi_pico_pio_driver_api = {
 	.command_write = mipi_dbi_pico_pio_command_write,
 	.write_display = mipi_dbi_pico_pio_write_display
 };
-
-/* This macro is repeatedly called by LISTIFY() at compile-time to generate the data bus LUT */
-#define LUT_GEN(i, n) (((i & (1 << 0)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 0)) : 0) |   \
-		       ((i & (1 << 1)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 1)) : 0) |   \
-		       ((i & (1 << 2)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 2)) : 0) |   \
-		       ((i & (1 << 3)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 3)) : 0) |   \
-		       ((i & (1 << 4)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 4)) : 0) |   \
-		       ((i & (1 << 5)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 5)) : 0) |   \
-		       ((i & (1 << 6)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 6)) : 0) |   \
-		       ((i & (1 << 7)) ? (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 7)) : 0))
-
-/* If at least one instance has an 8-bit bus, add a data look-up table to the read-only config.
- * Whether or not it is valid and actually used for a particular instance is decided at runtime
- * and stored in the instance's mipi_dbi_pico_pio_data.single_port.
- */
-#if MIPI_DBI_8_BIT_MODE
-#define DATA_LUT_OPTIMIZATION(n)                                                                   \
-		.data_lut = { LISTIFY(256, LUT_GEN, (,), n) },                                     \
-		.data_mask = ((1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 0)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 1)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 2)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 3)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 4)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 5)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 6)) |                   \
-			      (1 << DT_INST_GPIO_PIN_BY_IDX(n, data_gpios, 7)))
-#else
-#define DATA_LUT_OPTIMIZATION(n)
-#endif
 
 #define PIO_MIPI_DBI_INIT(n)                                                                   \
 	static const struct mipi_dbi_pico_pio_config mipi_dbi_pico_pio_config_##n = {                \
@@ -499,7 +394,6 @@ static const struct mipi_dbi_driver_api mipi_dbi_pico_pio_driver_api = {
 		.cs = GPIO_DT_SPEC_INST_GET_OR(n, cs_gpios, {}),                                   \
 		.cmd_data = GPIO_DT_SPEC_INST_GET_OR(n, dc_gpios, {}),                             \
 		.reset = GPIO_DT_SPEC_INST_GET_OR(n, reset_gpios, {}),                             \
-		DATA_LUT_OPTIMIZATION(n)                                                           \
 	};                                                                                         \
 	BUILD_ASSERT(DT_INST_PROP_LEN(n, data_gpios) < MIPI_DBI_MAX_DATA_BUS_WIDTH,                \
 		     "Number of data GPIOs in DT exceeds MIPI_DBI_MAX_DATA_BUS_WIDTH");            \
