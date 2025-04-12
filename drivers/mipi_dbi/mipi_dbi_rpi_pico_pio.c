@@ -14,6 +14,8 @@
 #include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 
 #include <hardware/pio.h>
+#include <hardware/dma.h>
+#include <hardware/irq.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
@@ -57,6 +59,11 @@ struct mipi_dbi_pico_pio_data {
 	size_t pio_sm_otherbits;
 	struct k_mutex lock;
 };
+
+static int dma_firsttwobits;
+static int dma_thirdbit;
+static int dma_otherbits;
+K_MSGQ_DEFINE(my_msgq, sizeof(int), 1, 4);
 
 #if 0
 RPI_PICO_PIO_DEFINE_PROGRAM(firsttwobits, 0, 3,
@@ -107,6 +114,66 @@ RPI_PICO_PIO_DEFINE_PROGRAM(parallel_8bit, 9, 13,
 );
 #endif
 
+static int done = 0;
+static void dma_handler(const void *arg)
+{
+	if ((dma_hw->ints0 & 1u << dma_firsttwobits)) {
+		dma_hw->ints0 = 1u << dma_firsttwobits;
+		done |= 1 << dma_firsttwobits;
+	}
+
+	if ((dma_hw->ints0 & 1u << dma_thirdbit)) {
+		dma_hw->ints0 = 1u << dma_thirdbit;
+		done |= 1 << dma_thirdbit;
+	}
+
+	if ((dma_hw->ints0 & 1u << dma_otherbits)) {
+		dma_hw->ints0 = 1u << dma_otherbits;
+		done |= 1 << dma_otherbits;
+	}
+
+	if (done == (1u << dma_firsttwobits | 1u << dma_thirdbit | 1u << dma_otherbits)) {
+		done = 0;
+		k_msgq_put(&my_msgq, &done, K_NO_WAIT);
+	}
+}
+
+static void mipi_dbi_pio_setup_dma(size_t sm, int* dma)
+{
+	*dma = dma_claim_unused_channel(true);
+	dma_channel_config dma_config = dma_channel_get_default_config(*dma);
+	channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_8);
+	channel_config_set_read_increment(&dma_config, true);
+	switch(sm) {
+	case 0:
+		channel_config_set_dreq(&dma_config, DREQ_PIO0_TX0);
+		break;
+	case 1:
+		channel_config_set_dreq(&dma_config, DREQ_PIO0_TX1);
+		break;
+	case 2:
+		channel_config_set_dreq(&dma_config, DREQ_PIO0_TX2);
+		break;
+	case 3:
+		channel_config_set_dreq(&dma_config, DREQ_PIO0_TX3);
+		break;
+	default:
+		assert("");
+	}
+
+	dma_channel_configure(
+		*dma,
+		&dma_config,
+		&pio0_hw->txf[sm], // Write address (only need to set this once)
+		NULL,             // Don't provide a read address yet
+		0,                // Write the same value many times, then halt and interrupt
+		false             // Don't start yet
+	);
+
+	// Tell the DMA to raise IRQ line 0 when the channel finishes a block
+	dma_channel_set_irq0_enabled(*dma, true);
+}
+
 static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg,
 				  struct mipi_dbi_pico_pio_data *data,
 				  uint16_t clock_div)
@@ -140,6 +207,8 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 	pio_sm_set_consecutive_pindirs(data->pio, data->pio_sm_firsttwobits, dev_cfg->data[0].pin, 2, true);
 	pio_sm_init(data->pio, data->pio_sm_firsttwobits, offset, &sm_config);
 
+	mipi_dbi_pio_setup_dma(data->pio_sm_firsttwobits, &dma_firsttwobits);
+
 
 	rc = pio_rpi_pico_allocate_sm(dev_cfg->piodev, &data->pio_sm_thirdbit);
 	if (rc < 0) {
@@ -163,6 +232,8 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 	pio_gpio_init(data->pio, dev_cfg->data[2].pin);
 	pio_sm_set_consecutive_pindirs(data->pio, data->pio_sm_thirdbit, dev_cfg->data[2].pin, 1, true);
 	pio_sm_init(data->pio, data->pio_sm_thirdbit, offset + 4, &sm_config);
+
+	mipi_dbi_pio_setup_dma(data->pio_sm_thirdbit, &dma_thirdbit);
 
 
 	rc = pio_rpi_pico_allocate_sm(dev_cfg->piodev, &data->pio_sm_otherbits);
@@ -191,6 +262,12 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 	pio_gpio_init(data->pio, dev_cfg->data[7].pin);
 	pio_sm_set_consecutive_pindirs(data->pio, data->pio_sm_otherbits, dev_cfg->data[3].pin, 5, true);
 	pio_sm_init(data->pio, data->pio_sm_otherbits, offset + 9, &sm_config);
+
+	mipi_dbi_pio_setup_dma(data->pio_sm_otherbits, &dma_otherbits);
+
+	// Configure the processor to run dma_handler() when DMA IRQ 0 is asserted
+	IRQ_CONNECT(DMA_IRQ_0, 0, dma_handler, NULL, 0);
+	irq_enable(DMA_IRQ_0);
 
 	// enable all state machines in sync
 	uint32_t mask = BIT(data->pio_sm_firsttwobits) | BIT(data->pio_sm_thirdbit) | BIT(data->pio_sm_otherbits);
@@ -225,6 +302,8 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 			pio_sm_put_blocking(data->pio,data->pio_sm_otherbits, (uint32_t)cmd);
 		}
 		if (len > 0) {
+			static uint32_t max_len = 0;
+			max_len = MAX(max_len, len);
 			// setup dma to transfer data, lock with a message queue or simple mutex
 			// interrupt routine listens on end of dma.. usually this would be the case
 			// but as we have shared data pins with touch controller we have to listen
@@ -232,13 +311,27 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 			// empty may be good enough?
 			gpio_pin_set_dt(&config->cmd_data, 1);
 
-			while (len > 0) {
-				value = *(data_buf++);
-				pio_sm_put_blocking(data->pio,data->pio_sm_firsttwobits, (uint32_t)value);
-				pio_sm_put_blocking(data->pio,data->pio_sm_thirdbit, (uint32_t)value);
-				pio_sm_put_blocking(data->pio,data->pio_sm_otherbits, (uint32_t)value);
-				len--;
-			}
+			// TODO: dma only for certain size upwards
+			dma_channel_set_trans_count(dma_firsttwobits, len, false);
+			dma_channel_set_trans_count(dma_thirdbit, len, false);
+			dma_channel_set_trans_count(dma_otherbits, len, false);
+
+			k_msgq_purge(&my_msgq);
+
+			dma_channel_set_read_addr(dma_firsttwobits, &data_buf[0], true);
+			dma_channel_set_read_addr(dma_thirdbit, &data_buf[0], true);
+			dma_channel_set_read_addr(dma_otherbits, &data_buf[0], true);
+
+			int msgq_val;
+			k_msgq_get(&my_msgq, &msgq_val, K_FOREVER);
+
+			// while (len > 0) {
+			// 	value = *(data_buf++);
+			// 	pio_sm_put_blocking(data->pio,data->pio_sm_firsttwobits, (uint32_t)value);
+			// 	pio_sm_put_blocking(data->pio,data->pio_sm_thirdbit, (uint32_t)value);
+			// 	pio_sm_put_blocking(data->pio,data->pio_sm_otherbits, (uint32_t)value);
+			// 	len--;
+			// }
 		}
 		gpio_pin_set_dt(&config->cs, 0);
 		break;
@@ -367,6 +460,11 @@ static const struct mipi_dbi_driver_api mipi_dbi_pico_pio_driver_api = {
 	.command_write = mipi_dbi_pico_pio_command_write,
 	.write_display = mipi_dbi_pico_pio_write_display
 };
+
+#define IRQ_CONFIGURE(n, inst)                                                                     \
+	IRQ_CONNECT(DT_INST_IRQ_BY_IDX(inst, n, irq), DT_INST_IRQ_BY_IDX(inst, n, priority),       \
+		    dma_rpi_pico_isr, DEVICE_DT_INST_GET(inst), 0);                                \
+	irq_enable(DT_INST_IRQ_BY_IDX(inst, n, irq));
 
 #define PIO_MIPI_DBI_INIT(n)                                                                   \
 	static const struct mipi_dbi_pico_pio_config mipi_dbi_pico_pio_config_##n = {                \
