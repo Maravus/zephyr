@@ -1,0 +1,26 @@
+# Copyright (c) 2020,2023 NXP
+# SPDX-License-Identifier: Apache-2.0
+
+description: resistive touch panel
+
+compatible: "input-resistive"
+
+include: [touchscreen-common.yaml]
+
+properties:
+  xm-gpios:
+    type: phandle-array
+    description: |
+      Must be an analog pin
+  xp-gpios:
+    type: phandle-array
+    description: |
+      Can be any pin (analog/digital)
+  yp-gpios:
+    type: phandle-array
+    description: |
+      Must be an analog pin
+  ym-gpios:
+    type: phandle-array
+    description: |
+      Can be any pin (analog/digital)

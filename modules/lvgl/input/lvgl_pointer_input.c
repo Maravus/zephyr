@@ -108,6 +108,7 @@ static void lvgl_pointer_process_event(struct input_event *evt, void *user_data)
 		break;
 	}
 
+	LOG_WRN("x: %4i | y: %4i", point->x, point->y);
 	/* filter readings within display */
 	if (point->x <= 0) {
 		point->x = 0;
@@ -120,6 +121,8 @@ static void lvgl_pointer_process_event(struct input_event *evt, void *user_data)
 	} else if (point->y >= cap->y_resolution) {
 		point->y = cap->y_resolution - 1;
 	}
+
+	LOG_WRN("after x: %4i | y: %4i", point->x, point->y);
 
 	if (k_msgq_put(cfg->common_config.event_msgq, &data->common_data.pending_event,
 		       K_NO_WAIT) != 0) {
