@@ -106,7 +106,7 @@ RPI_PICO_PIO_DEFINE_PROGRAM(parallel_8bit, 9, 13,
 	0x0004, //  8: jmp    4
 	    //     .wrap_target
 	0x80a0, //  9: pull   block
-	0xc104, // 10: irq    nowait 4               [1]
+	0xc204, // 10: irq    nowait 4               [2]
 	0x6063, // 11: out    null, 3
 	0x6005, // 12: out    pins, 5
 	0xc044, // 13: irq    clear 4
