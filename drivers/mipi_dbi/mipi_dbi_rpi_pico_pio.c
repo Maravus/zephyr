@@ -69,7 +69,7 @@ K_MSGQ_DEFINE(my_msgq, sizeof(int), 1, 4);
 RPI_PICO_PIO_DEFINE_PROGRAM(pio_firsttwobits, 0, 1,
 	//     .wrap_target
 	0x38c4, //  0: wait   1 irq, 4        side 1
-	0x7002, //  1: out    pins, 2         side 0
+	0x7102, //  1: out    pins, 2         side 0 [1]
 	//     .wrap
 );
 
@@ -77,7 +77,7 @@ RPI_PICO_PIO_DEFINE_PROGRAM(pio_thirdbit, 0, 2,
 	//     .wrap_target
 	0x6062, //  0: out    null, 2
 	0x20c4, //  1: wait   1 irq, 4
-	0x6001, //  2: out    pins, 1
+	0x6101, //  2: out    pins, 1 [1]
 	//     .wrap
 );
 
@@ -86,7 +86,7 @@ RPI_PICO_PIO_DEFINE_PROGRAM(pio_otherbits, 0, 3,
 	0x6063, //  0: out    null, 3
 	0xc004, //  1: irq    nowait 4
 	0xc044, //  2: irq    clear 4
-	0x6005, //  3: out    pins, 5
+	0x6105, //  3: out    pins, 5 [1]
 	//     .wrap
 );
 #else
