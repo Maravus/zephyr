@@ -65,33 +65,29 @@ static int dma_thirdbit;
 static int dma_otherbits;
 K_MSGQ_DEFINE(my_msgq, sizeof(int), 1, 4);
 
-#if 0
-RPI_PICO_PIO_DEFINE_PROGRAM(firsttwobits, 0, 3,
+#if 1
+RPI_PICO_PIO_DEFINE_PROGRAM(pio_firsttwobits, 0, 1,
 	//     .wrap_target
-	0x98a0, //  0: pull   block           side 1
-	0x2044, //  1: wait   0 irq, 4
-	0xb042, //  2: nop                    side 0
-	0x6102, //  3: out    pins, 2                [1]
-	    //     .wrap
+	0x38c4, //  0: wait   1 irq, 4        side 1
+	0x7002, //  1: out    pins, 2         side 0
+	//     .wrap
 );
 
-RPI_PICO_PIO_DEFINE_PROGRAM(thirdbit, 0, 3,
+RPI_PICO_PIO_DEFINE_PROGRAM(pio_thirdbit, 0, 2,
 	//     .wrap_target
-	0x80a0, //  0: pull   block
-	0x2044, //  1: wait   0 irq, 4
-	0x6062, //  2: out    null, 2
-	0x6101, //  3: out    pins, 1                [1]
-	    //     .wrap
+	0x6062, //  0: out    null, 2
+	0x20c4, //  1: wait   1 irq, 4
+	0x6001, //  2: out    pins, 1
+	//     .wrap
 );
 
-RPI_PICO_PIO_DEFINE_PROGRAM(otherbits, 0, 4,
+RPI_PICO_PIO_DEFINE_PROGRAM(pio_otherbits, 0, 3,
 	//     .wrap_target
-	0x80a0, //  0: pull   block
-	0xc044, //  1: irq    clear 4
-	0x6063, //  2: out    null, 3
+	0x6063, //  0: out    null, 3
+	0xc004, //  1: irq    nowait 4
+	0xc044, //  2: irq    clear 4
 	0x6005, //  3: out    pins, 5
-	0xc004, //  4: irq    nowait 4
-	    //     .wrap
+	//     .wrap
 );
 #else
 RPI_PICO_PIO_DEFINE_PROGRAM(parallel_8bit, 9, 13,
@@ -186,7 +182,7 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 
 	// Load the PIO program. Starting by default with 16 bits mode
 	// since it's at the begining of the PIO program.
-	uint32_t offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(parallel_8bit));
+	uint32_t offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(pio_firsttwobits));
 	pio_sm_config sm_config = pio_get_default_sm_config();
 	sm_config_set_sideset(&sm_config, 2, true, false);
 	sm_config_set_sideset_pins(&sm_config, dev_cfg->wr.pin);
@@ -194,12 +190,12 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 	// Set clock divider. Value of 1 for max speed.
 	sm_config_set_clkdiv_int_frac(&sm_config, clock_div, 0);
 	sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
-	// sm_config_set_wrap(&sm_config,
-	// 		   offset + RPI_PICO_PIO_GET_WRAP_TARGET(parallel_8bit),
-	// 		   offset + RPI_PICO_PIO_GET_WRAP(parallel_8bit));
+	sm_config_set_wrap(&sm_config,
+			   offset + RPI_PICO_PIO_GET_WRAP_TARGET(pio_firsttwobits),
+			   offset + RPI_PICO_PIO_GET_WRAP(pio_firsttwobits));
 	// The OSR register shifts to the right, sending the MSB byte
 	// first, in a double bytes transfers.
-	sm_config_set_out_shift(&sm_config, true, false, 0);
+	sm_config_set_out_shift(&sm_config, true, true, 2);
 	pio_gpio_init(data->pio, dev_cfg->wr.pin);
 	pio_gpio_init(data->pio, dev_cfg->data[0].pin);
 	pio_gpio_init(data->pio, dev_cfg->data[1].pin);
@@ -217,21 +213,21 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 
 	// Load the PIO program. Starting by default with 16 bits mode
 	// since it's at the begining of the PIO program.
-	// offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(parallel_8bit));
+	offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(pio_thirdbit));
 	sm_config = pio_get_default_sm_config();
 	sm_config_set_out_pins(&sm_config, dev_cfg->data[2].pin, 1);
 	// Set clock divider. Value of 1 for max speed.
 	sm_config_set_clkdiv_int_frac(&sm_config, clock_div, 0);
 	sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
-	// sm_config_set_wrap(&sm_config,
-	// 		   offset + 4 + RPI_PICO_PIO_GET_WRAP_TARGET(parallel_8bit),
-	// 		   offset + 4 + RPI_PICO_PIO_GET_WRAP(parallel_8bit));
+	sm_config_set_wrap(&sm_config,
+			   offset + RPI_PICO_PIO_GET_WRAP_TARGET(pio_thirdbit),
+			   offset + RPI_PICO_PIO_GET_WRAP(pio_thirdbit));
 	// The OSR register shifts to the right, sending the MSB byte
 	// first, in a double bytes transfers.
-	sm_config_set_out_shift(&sm_config, true, false, 0);
+	sm_config_set_out_shift(&sm_config, true, true, 3);
 	pio_gpio_init(data->pio, dev_cfg->data[2].pin);
 	pio_sm_set_consecutive_pindirs(data->pio, data->pio_sm_thirdbit, dev_cfg->data[2].pin, 1, true);
-	pio_sm_init(data->pio, data->pio_sm_thirdbit, offset + 4, &sm_config);
+	pio_sm_init(data->pio, data->pio_sm_thirdbit, offset, &sm_config);
 
 	mipi_dbi_pio_setup_dma(data->pio_sm_thirdbit, &dma_thirdbit);
 
@@ -243,25 +239,25 @@ static int mipi_dbi_pio_configure(const struct mipi_dbi_pico_pio_config *dev_cfg
 
 	// Load the PIO program. Starting by default with 16 bits mode
 	// since it's at the begining of the PIO program.
-	// offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(parallel_8bit));
+	offset = pio_add_program(data->pio, RPI_PICO_PIO_GET_PROGRAM(pio_otherbits));
 	sm_config = pio_get_default_sm_config();
 	sm_config_set_out_pins(&sm_config, dev_cfg->data[3].pin, 5);
 	// Set clock divider. Value of 1 for max speed.
 	sm_config_set_clkdiv_int_frac(&sm_config, clock_div, 0);
 	sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
 	sm_config_set_wrap(&sm_config,
-			   offset + RPI_PICO_PIO_GET_WRAP_TARGET(parallel_8bit),
-			   offset + RPI_PICO_PIO_GET_WRAP(parallel_8bit));
+			   offset + RPI_PICO_PIO_GET_WRAP_TARGET(pio_otherbits),
+			   offset + RPI_PICO_PIO_GET_WRAP(pio_otherbits));
 	// The OSR register shifts to the right, sending the MSB byte
 	// first, in a double bytes transfers.
-	sm_config_set_out_shift(&sm_config, true, false, 0);
+	sm_config_set_out_shift(&sm_config, true, true, 8);
 	pio_gpio_init(data->pio, dev_cfg->data[3].pin);
 	pio_gpio_init(data->pio, dev_cfg->data[4].pin);
 	pio_gpio_init(data->pio, dev_cfg->data[5].pin);
 	pio_gpio_init(data->pio, dev_cfg->data[6].pin);
 	pio_gpio_init(data->pio, dev_cfg->data[7].pin);
 	pio_sm_set_consecutive_pindirs(data->pio, data->pio_sm_otherbits, dev_cfg->data[3].pin, 5, true);
-	pio_sm_init(data->pio, data->pio_sm_otherbits, offset + 9, &sm_config);
+	pio_sm_init(data->pio, data->pio_sm_otherbits, offset, &sm_config);
 
 	mipi_dbi_pio_setup_dma(data->pio_sm_otherbits, &dma_otherbits);
 
