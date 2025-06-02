@@ -12,3 +12,11 @@ config MIPI_DBI_RPI_PICO_PIO
 	help
 	  Enable support for MIPI DBI driver. This driver implements
 	  a MIPI-DBI mode A and B compatible controller using PIO.
+
+config MIPI_DBI_RPI_PICO_PIO_CLOCK_DIV
+    	int "Clock divisor for PIO state machine"
+    	default 1
+    	range 1 65536
+    	help
+    	  Rather than slowing the system clock itself, the clock divider redefines how many system clock periods are considered
+          to be "one cycle", for execution purposes.
