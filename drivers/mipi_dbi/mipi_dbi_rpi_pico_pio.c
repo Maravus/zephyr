@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
 #define MIPI_DBI_MAX_SPLITS 4
 
 #define CLK_DIV           CONFIG_MIPI_DBI_RPI_PICO_PIO_CLOCK_DIV
-#define SIDESET_BIT_COUNT 2
+#define SIDESET_BIT_COUNT 4
 #define CYCLES_PER_BIT    4
 #define SM_SEND_BIT_DURATION_US                                                                    \
 	MAX(((1e6 * CYCLES_PER_BIT * CLK_DIV) / CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC), 1)
@@ -69,7 +69,7 @@ struct mipi_dbi_pico_pio_sm {
 	uint32_t wrap;
 	uint32_t wrap_target;
 	struct pio_program program;
-	uint16_t program_instructions[3];
+	uint16_t program_instructions[7];
 };
 
 struct mipi_dbi_pico_pio_split {
@@ -237,11 +237,33 @@ static void mipi_dbi_pio_configure_program(struct mipi_dbi_pico_pio_split *split
 		SET_SM_PROGRAM(1, splits[0].pin_count)
 		__fallthrough;
 	case 1:
-		CONFIG_SM_PROGRAM(0, 0, 1, 2)
-		/*  0: pull   ifempty block   side 1 [1] */
-		split->sm.program_instructions[0] = 0x99e0;
-		/*  1: out    pins, #pins     side 0 [1] */
-		split->sm.program_instructions[1] = 0x7100 | split->pin_count;
+		/*
+		 * .side_set 3 opt
+		 *
+		 * pull ifempty side 7
+		 * nop side 4 [1]
+		 * out pins, 1 side 0 [1]
+		 * out x, 8 side 4
+		 * bitloop:
+		 * pull ifempty side 6 [1]
+		 * out pins, 1 side 2
+		 * jmp x-- bitloop
+		 */
+		CONFIG_SM_PROGRAM(0, 0, 6, 7)
+		/*  0: pull   ifempty block   side 7 [1] */
+		split->sm.program_instructions[0] = 0x9fe0;
+		/*  1: nop                    side 4 [1] */
+		split->sm.program_instructions[1] = 0xb942;
+		/*  2: out    pins, #pins         side 0 [1] */
+		split->sm.program_instructions[2] = 0x7100 | split->pin_count;
+		/*  3: out    x, 8           side 4 */
+		split->sm.program_instructions[3] = 0x7828;
+		/*  4: pull   ifempty block   side 6 [1] */
+		split->sm.program_instructions[4] = 0x9de0;
+		/*  5: out    pins, #pins         side 2 */
+		split->sm.program_instructions[5] = 0x7400 | split->pin_count;
+		/*  6: jmp    x--, 4 */
+		split->sm.program_instructions[6] = 0x0044;
 		__fallthrough;
 	default:
 		break;
@@ -265,6 +287,12 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 	if (gpio_is_ready_dt(&dev_cfg->wr)) {
 		pio_gpio_init(data->pio, dev_cfg->wr.pin);
 	}
+	if (gpio_is_ready_dt(&dev_cfg->cmd_data)) {
+		pio_gpio_init(data->pio, dev_cfg->cmd_data.pin);
+	}
+	if (gpio_is_ready_dt(&dev_cfg->cs)) {
+		pio_gpio_init(data->pio, dev_cfg->cs.pin);
+	}
 
 	for (int i = 0; i < data->split_count; ++i) {
 		struct mipi_dbi_pico_pio_split *p_split = &data->split[i];
@@ -287,7 +315,7 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 
 		if (i == 0) {
 			rc = pio_sm_set_consecutive_pindirs(data->pio, p_split->sm.sm,
-							    dev_cfg->wr.pin, 1, true);
+							    dev_cfg->cs.pin, 3, true);
 			if (rc < 0) {
 				return rc;
 			}
@@ -307,7 +335,7 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 
 		if (i == 0) {
 			sm_config_set_sideset(&sm_config, SIDESET_BIT_COUNT, true, false);
-			sm_config_set_sideset_pins(&sm_config, dev_cfg->wr.pin);
+			sm_config_set_sideset_pins(&sm_config, dev_cfg->cs.pin);
 		}
 
 		rc = pio_sm_init(data->pio, p_split->sm.sm, offset, &sm_config);
@@ -352,6 +380,7 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 					  size_t len)
 {
 	int ret = 0;
+	uint32_t dma_channel_mask = 0;
 
 	const struct mipi_dbi_pico_pio_config *config = dev->config;
 	struct mipi_dbi_pico_pio_data *data = dev->data;
@@ -365,23 +394,19 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 	case MIPI_DBI_MODE_8080_BUS_8_BIT:
 	case MIPI_DBI_MODE_8080_BUS_9_BIT:
 	case MIPI_DBI_MODE_8080_BUS_16_BIT:
-		gpio_pin_set_dt(&config->cs, 1);
+		pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
+
 		if (cmd_present) {
-			pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
-			gpio_pin_set_dt(&config->cmd_data, 0);
 			for (int i = 0; i < data->split_count; ++i) {
 				pio_sm_put_blocking(data->pio, data->split[i].sm.sm, (uint32_t)cmd);
 			}
-			pio_enable_sm_mask_in_sync(data->pio, data->sm_mask);
-			mipi_dbi_pico_pio_wait_end_of_transmission(data);
-			gpio_pin_set_dt(&config->cmd_data, 1);
 		}
+
+		// put length into fifo
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len - 1 );
+
 		if (len > 0) {
 			k_msgq_purge(config->msq_dma);
-
-			pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
-
-			uint32_t dma_channel_mask = 0;
 
 			for (int i = 0; i < data->split_count; ++i) {
 				WRITE_BIT(dma_channel_mask, data->split[i].dma.channel, true);
@@ -392,20 +417,20 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 					   &data->split[i].dma.config);
 				dma_start(config->dev_dma, data->split[i].dma.channel);
 			}
-
-			pio_enable_sm_mask_in_sync(data->pio, data->sm_mask);
-
-			/* wait for end of dma(s) */
-			int channel;
-
-			while (dma_channel_mask != 0) {
-				k_msgq_get(config->msq_dma, &channel, K_FOREVER);
-				WRITE_BIT(dma_channel_mask, channel, false);
-			}
-
-			mipi_dbi_pico_pio_wait_end_of_transmission(data);
 		}
-		gpio_pin_set_dt(&config->cs, 0);
+
+		pio_enable_sm_mask_in_sync(data->pio, data->sm_mask);
+
+		/* wait for end of dma(s) */
+		int channel;
+
+		while (dma_channel_mask != 0) {
+			k_msgq_get(config->msq_dma, &channel, K_FOREVER);
+			WRITE_BIT(dma_channel_mask, channel, false);
+		}
+
+		mipi_dbi_pico_pio_wait_end_of_transmission(data);
+
 		break;
 
 	default:
@@ -463,22 +488,6 @@ static int mipi_dbi_pico_pio_init(const struct device *dev)
 		return ret;
 	}
 
-	if (gpio_is_ready_dt(&config->cmd_data)) {
-		ret = gpio_pin_configure_dt(&config->cmd_data, GPIO_OUTPUT_ACTIVE);
-		if (ret < 0) {
-			failed_pin = "cmd_data";
-			goto fail;
-		}
-		gpio_pin_set_dt(&config->cmd_data, 0);
-	}
-	if (gpio_is_ready_dt(&config->cs)) {
-		ret = gpio_pin_configure_dt(&config->cs, GPIO_OUTPUT_ACTIVE);
-		if (ret < 0) {
-			failed_pin = "cs";
-			goto fail;
-		}
-		gpio_pin_set_dt(&config->cs, 0);
-	}
 	if (gpio_is_ready_dt(&config->reset)) {
 		ret = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_ACTIVE);
 		if (ret < 0) {
@@ -503,7 +512,7 @@ static DEVICE_API(mipi_dbi, mipi_dbi_pico_pio_driver_api) = {
 	K_MSGQ_DEFINE(dma_msgq##n, sizeof(int), MIPI_DBI_MAX_SPLITS, 4);                           \
                                                                                                    \
 	static const struct gpio_dt_spec data_bus_gpios_##n[] = {                                  \
-		DT_INST_FOREACH_PROP_ELEM_SEP(n, data_gpios, GPIO_DT_SPEC_GET_BY_IDX, (,))};       \
+		DT_INST_FOREACH_PROP_ELEM_SEP(n, data_gpios, GPIO_DT_SPEC_GET_BY_IDX, (, ))};      \
                                                                                                    \
 	static const struct mipi_dbi_pico_pio_config mipi_dbi_pico_pio_config_##n = {              \
 		.dev_dma = DEVICE_DT_GET(DT_NODELABEL(dma)),                                       \
