@@ -69,7 +69,7 @@ struct mipi_dbi_pico_pio_sm {
 	uint32_t wrap;
 	uint32_t wrap_target;
 	struct pio_program program;
-	uint16_t program_instructions[7];
+	uint16_t program_instructions[9];
 };
 
 struct mipi_dbi_pico_pio_split {
@@ -100,6 +100,18 @@ static void mipi_dbi_pio_dma_handler(const struct device *dev, void *user_data, 
 		if (data->split[i].dma.channel == channel) {
 			k_msgq_put(config->msq_dma, &channel, K_NO_WAIT);
 		}
+	}
+}
+
+static void pio_irq_handler(const struct device *dev)
+{
+	// Check which IRQ fired
+	if (pio_interrupt_get(pio0, 0)) {
+		// Clear the IRQ flag
+		pio_interrupt_clear(pio0, 0);
+
+		// Do whatever you need here
+		printf("PIO IRQ 0 triggered!\n");
 	}
 }
 
@@ -213,14 +225,21 @@ static int mipi_dbi_pio_count_splits(const struct mipi_dbi_pico_pio_config *dev_
 	split->sm.program.instructions = split->sm.program_instructions;
 
 #define SET_SM_PROGRAM(sm_index, _pin_discarded)                                                   \
-	CONFIG_SM_PROGRAM(sm_index, 0, 2, 3)                                                       \
+	CONFIG_SM_PROGRAM(sm_index, 3, 5, 6)                                                       \
 	split->pin_discarded = (_pin_discarded);                                                   \
-	/*  0: pull   ifempty block */                                                             \
-	split->sm.program_instructions[0] = 0x80e0;                                                \
+	/*  0: pull   ifempty block [3] */                                                         \
+	split->sm.program_instructions[0] = 0x83e0;                                                \
 	/*  1: out    null, #discarded_pins */                                                     \
 	split->sm.program_instructions[1] = 0x6060 | split->pin_discarded;                         \
-	/*  2: out    pins, #pins [1] */                                                           \
-	split->sm.program_instructions[2] = 0x6100 | split->pin_count;
+	/*  2: out    pins, #pins [3] */                                                           \
+	split->sm.program_instructions[2] = 0x6300 | split->pin_count;                             \
+	/* .wrap-target */                                                                         \
+	/*  3: pull   ifempty block */                                                             \
+	split->sm.program_instructions[3] = 0x80e0;                                                \
+	/*  4: out    null, #discarded_pins */                                                     \
+	split->sm.program_instructions[4] = 0x6060 | split->pin_discarded;                         \
+	/*  5: out    pins, #pins [1] */                                                           \
+	split->sm.program_instructions[5] = 0x6100 | split->pin_count;
 
 static void mipi_dbi_pio_configure_program(struct mipi_dbi_pico_pio_split *splits, int split_count)
 {
@@ -238,32 +257,40 @@ static void mipi_dbi_pio_configure_program(struct mipi_dbi_pico_pio_split *split
 		__fallthrough;
 	case 1:
 		/*
-		 * .side_set 3 opt
-		 *
-		 * pull ifempty side 7
-		 * nop side 4 [1]
-		 * out pins, 1 side 0 [1]
-		 * out x, 8 side 4
-		 * bitloop:
-		 * pull ifempty side 6 [1]
-		 * out pins, 1 side 2
-		 * jmp x-- bitloop
+			.side_set 3 opt
+
+			pull ifempty side 7
+			out x, 32 [1] side 6
+
+			pull ifempty [1] side 4
+			out pins, 1 [1] side 0
+			nop [1] side 4
+
+			loop:
+			pull ifempty [1] side 6
+			out pins, 1 side 2
+			jmp x-- loop
 		 */
-		CONFIG_SM_PROGRAM(0, 0, 6, 7)
-		/*  0: pull   ifempty block   side 7 [1] */
-		split->sm.program_instructions[0] = 0x9fe0;
-		/*  1: nop                    side 4 [1] */
-		split->sm.program_instructions[1] = 0xb942;
-		/*  2: out    pins, #pins         side 0 [1] */
-		split->sm.program_instructions[2] = 0x7100 | split->pin_count;
-		/*  3: out    x, 8           side 4 */
-		split->sm.program_instructions[3] = 0x7828;
-		/*  4: pull   ifempty block   side 6 [1] */
-		split->sm.program_instructions[4] = 0x9de0;
-		/*  5: out    pins, #pins         side 2 */
-		split->sm.program_instructions[5] = 0x7400 | split->pin_count;
-		/*  6: jmp    x--, 4 */
-		split->sm.program_instructions[6] = 0x0044;
+		CONFIG_SM_PROGRAM(0, 0, 8, 9)
+		/*  0: pull   ifempty block   side 7 */
+		split->sm.program_instructions[0] = 0x9ee0;
+		/*  1: out    x, 32           side 6 [1] */
+		split->sm.program_instructions[1] = 0x7d20;
+		/*  2: pull   ifempty block   side 4 [1] */
+		split->sm.program_instructions[2] = 0x99e0;
+		/*  3: out    pins, #pins     side 0 [1] */
+		split->sm.program_instructions[3] = 0x7100 | split->pin_count;
+		/*  4: nop                    side 4 [1] */
+		split->sm.program_instructions[4] = 0xb942;
+		/*  5: pull   ifempty block   side 6 [1] */
+		split->sm.program_instructions[5] = 0x9de0;
+		/*  6: out    pins, #pins     side 2 */
+		split->sm.program_instructions[6] = 0x7400 | split->pin_count;
+		/*  7: jmp    x--, 5 */
+		split->sm.program_instructions[7] = 0x0045;
+		/*  8: nop                    side 6 [1]  */
+		split->sm.program_instructions[8] = 0xbd42;
+
 		__fallthrough;
 	default:
 		break;
@@ -293,6 +320,10 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 	if (gpio_is_ready_dt(&dev_cfg->cs)) {
 		pio_gpio_init(data->pio, dev_cfg->cs.pin);
 	}
+
+	// irq_enable(PIO0_IRQ_0);
+
+	// pio_set_irq0_source_enabled(data->pio, pis_interrupt0, true);
 
 	for (int i = 0; i < data->split_count; ++i) {
 		struct mipi_dbi_pico_pio_split *p_split = &data->split[i];
@@ -396,19 +427,17 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 	case MIPI_DBI_MODE_8080_BUS_16_BIT:
 		pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
 
-		if (cmd_present) {
-			for (int i = 0; i < data->split_count; ++i) {
+		// put length into fifo
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len - 1);
+
+		k_msgq_purge(config->msq_dma);
+
+		for (int i = 0; i < data->split_count; ++i) {
+			if (cmd_present) {
 				pio_sm_put_blocking(data->pio, data->split[i].sm.sm, (uint32_t)cmd);
 			}
-		}
 
-		// put length into fifo
-		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len - 1 );
-
-		if (len > 0) {
-			k_msgq_purge(config->msq_dma);
-
-			for (int i = 0; i < data->split_count; ++i) {
+			if (len > 0) {
 				WRITE_BIT(dma_channel_mask, data->split[i].dma.channel, true);
 				data->split[i].dma.head_block.block_size = len;
 				data->split[i].dma.head_block.source_address =
@@ -533,3 +562,9 @@ static DEVICE_API(mipi_dbi, mipi_dbi_pico_pio_driver_api) = {
 			      CONFIG_MIPI_DBI_INIT_PRIORITY, &mipi_dbi_pico_pio_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(PIO_MIPI_DBI_INIT)
+
+/*
+ * IRQ_CONNECT(DT_INST_IRQN(n), DT_INST_IRQ(n, priority), pio_irq_handler,                    \
+DEVICE_DT_INST_GET(n), 0);                                                     \
+irq_enable(DT_INST_IRQN(n));
+ */
