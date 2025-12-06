@@ -36,6 +36,66 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
 #define SM_SEND_BIT_DURATION_US                                                                    \
 	MAX(((1e6 * CYCLES_PER_BIT * CLK_DIV) / CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC), 1)
 
+#define CONFIG_SM_PROGRAM(sm_index, _wrap_target, _wrap, _length)                                  \
+	split = &splits[sm_index];                                                                 \
+	split->pin_discarded = 0;                                                                  \
+	split->sm.wrap_target = (_wrap_target);                                                    \
+	split->sm.wrap = (_wrap);                                                                  \
+	split->sm.program.length = (_length);                                                      \
+	split->sm.program.origin = -1;                                                             \
+	split->sm.program.instructions = split->sm.program_instructions;
+
+/*
+ *		pull ifempty [2]
+ * 	.wrap_target
+ *      	nop [1]
+ * 	loop:
+ *     		out null 1 [1]
+ *     		out pins 1
+ *     		jmp pin loop
+ * 	.wrap
+ */
+#define SET_SM_PROGRAM_OPTIMIZED(sm_index, _pin_discarded)                                         \
+	CONFIG_SM_PROGRAM(sm_index, 1, 4, 5)                                                       \
+	split->pin_discarded = (_pin_discarded);                                                   \
+	split->sm.program_instructions[0] = 0x82e0;                                                \
+	split->sm.program_instructions[1] = 0xa142;                                                \
+	split->sm.program_instructions[2] = 0x6160 | split->pin_discarded;                         \
+	split->sm.program_instructions[3] = 0x6000 | split->pin_count;                             \
+	split->sm.program_instructions[4] = 0x00c2;
+
+/*
+ * 	.side_set 3 opt
+ *
+ *		pull ifempty side 7
+ *		out x, 32
+ *		out y, 32 side 6 ; auto-pull needs an additional cycle
+ *		jmp !Y data ; no cmd, jmp to "data"
+ *	cmd:
+ *		pull ifempty [1] side 4
+ *		out pins, 1 [1] side 0
+ *		jmp !X end [1] side 4 ; data length == 0, jmp to "end"
+ *	data:
+ *		pull ifempty [1] side 6
+ *		out pins, 1 side 2
+ *		jmp x-- data    ; repeat until data length == 0
+ *	end:
+ *		nop side 6 [1]
+ */
+#define SET_BASE_SM_PROGRAM_OPTIMIZED(sm_index)                                                    \
+	CONFIG_SM_PROGRAM(0, 0, 10, 11)                                                            \
+	split->sm.program_instructions[0] = 0x9ee0;                                                \
+	split->sm.program_instructions[1] = 0x6020;                                                \
+	split->sm.program_instructions[2] = 0x7c40 | split->pin_count;                             \
+	split->sm.program_instructions[3] = 0x0067;                                                \
+	split->sm.program_instructions[4] = 0x99e0;                                                \
+	split->sm.program_instructions[5] = 0x7100 | split->pin_count;                             \
+	split->sm.program_instructions[6] = 0x192a;                                                \
+	split->sm.program_instructions[7] = 0x9de0;                                                \
+	split->sm.program_instructions[8] = 0x7400 | split->pin_count;                             \
+	split->sm.program_instructions[9] = 0x0047;                                                \
+	split->sm.program_instructions[10] = 0xbd42;
+
 struct mipi_dbi_pico_pio_config {
 	const struct device *dev_dma;
 	const struct device *dev_pio;
@@ -66,10 +126,12 @@ struct mipi_dbi_pico_pio_dma {
 
 struct mipi_dbi_pico_pio_sm {
 	size_t sm;
+	pio_sm_config sm_config;
+	uint8_t inital_pc;
 	uint32_t wrap;
 	uint32_t wrap_target;
 	struct pio_program program;
-	uint16_t program_instructions[9];
+	uint16_t program_instructions[11];
 };
 
 struct mipi_dbi_pico_pio_split {
@@ -215,82 +277,23 @@ static int mipi_dbi_pio_count_splits(const struct mipi_dbi_pico_pio_config *dev_
 	return offset + 1;
 }
 
-#define CONFIG_SM_PROGRAM(sm_index, _wrap_target, _wrap, _length)                                  \
-	split = &splits[sm_index];                                                                 \
-	split->pin_discarded = 0;                                                                  \
-	split->sm.wrap_target = (_wrap_target);                                                    \
-	split->sm.wrap = (_wrap);                                                                  \
-	split->sm.program.length = (_length);                                                      \
-	split->sm.program.origin = -1;                                                             \
-	split->sm.program.instructions = split->sm.program_instructions;
-
-#define SET_SM_PROGRAM(sm_index, _pin_discarded)                                                   \
-	CONFIG_SM_PROGRAM(sm_index, 3, 5, 6)                                                       \
-	split->pin_discarded = (_pin_discarded);                                                   \
-	/*  0: pull   ifempty block [3] */                                                         \
-	split->sm.program_instructions[0] = 0x83e0;                                                \
-	/*  1: out    null, #discarded_pins */                                                     \
-	split->sm.program_instructions[1] = 0x6060 | split->pin_discarded;                         \
-	/*  2: out    pins, #pins [3] */                                                           \
-	split->sm.program_instructions[2] = 0x6300 | split->pin_count;                             \
-	/* .wrap-target */                                                                         \
-	/*  3: pull   ifempty block */                                                             \
-	split->sm.program_instructions[3] = 0x80e0;                                                \
-	/*  4: out    null, #discarded_pins */                                                     \
-	split->sm.program_instructions[4] = 0x6060 | split->pin_discarded;                         \
-	/*  5: out    pins, #pins [1] */                                                           \
-	split->sm.program_instructions[5] = 0x6100 | split->pin_count;
-
 static void mipi_dbi_pio_configure_program(struct mipi_dbi_pico_pio_split *splits, int split_count)
 {
 	struct mipi_dbi_pico_pio_split *split = NULL;
 
 	switch (split_count) {
 	case 4:
-		SET_SM_PROGRAM(3, splits[0].pin_count + splits[1].pin_count + splits[2].pin_count)
+		SET_SM_PROGRAM_OPTIMIZED(3, splits[0].pin_count + splits[1].pin_count +
+						    splits[2].pin_count)
 		__fallthrough;
 	case 3:
-		SET_SM_PROGRAM(2, splits[0].pin_count + splits[1].pin_count)
+		SET_SM_PROGRAM_OPTIMIZED(2, splits[0].pin_count + splits[1].pin_count)
 		__fallthrough;
 	case 2:
-		SET_SM_PROGRAM(1, splits[0].pin_count)
+		SET_SM_PROGRAM_OPTIMIZED(1, splits[0].pin_count)
 		__fallthrough;
 	case 1:
-		/*
-			.side_set 3 opt
-
-			pull ifempty side 7
-			out x, 32 [1] side 6
-
-			pull ifempty [1] side 4
-			out pins, 1 [1] side 0
-			nop [1] side 4
-
-			loop:
-			pull ifempty [1] side 6
-			out pins, 1 side 2
-			jmp x-- loop
-		 */
-		CONFIG_SM_PROGRAM(0, 0, 8, 9)
-		/*  0: pull   ifempty block   side 7 */
-		split->sm.program_instructions[0] = 0x9ee0;
-		/*  1: out    x, 32           side 6 [1] */
-		split->sm.program_instructions[1] = 0x7d20;
-		/*  2: pull   ifempty block   side 4 [1] */
-		split->sm.program_instructions[2] = 0x99e0;
-		/*  3: out    pins, #pins     side 0 [1] */
-		split->sm.program_instructions[3] = 0x7100 | split->pin_count;
-		/*  4: nop                    side 4 [1] */
-		split->sm.program_instructions[4] = 0xb942;
-		/*  5: pull   ifempty block   side 6 [1] */
-		split->sm.program_instructions[5] = 0x9de0;
-		/*  6: out    pins, #pins     side 2 */
-		split->sm.program_instructions[6] = 0x7400 | split->pin_count;
-		/*  7: jmp    x--, 5 */
-		split->sm.program_instructions[7] = 0x0045;
-		/*  8: nop                    side 6 [1]  */
-		split->sm.program_instructions[8] = 0xbd42;
-
+		SET_BASE_SM_PROGRAM_OPTIMIZED(0)
 		__fallthrough;
 	default:
 		break;
@@ -352,24 +355,30 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 			}
 		}
 
-		uint32_t offset = pio_add_program(data->pio, &p_split->sm.program);
+		p_split->sm.inital_pc = pio_add_program(data->pio, &p_split->sm.program);
 
-		pio_sm_config sm_config = pio_get_default_sm_config();
+		p_split->sm.sm_config = pio_get_default_sm_config();
 
-		sm_config_set_out_pins(&sm_config, p_split->pin_base, p_split->pin_count);
-		sm_config_set_clkdiv_int_frac(&sm_config, CLK_DIV, 0);
-		sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
-		sm_config_set_wrap(&sm_config, offset + p_split->sm.wrap_target,
-				   offset + p_split->sm.wrap);
-		sm_config_set_out_shift(&sm_config, true, true,
+		sm_config_set_out_pins(&p_split->sm.sm_config, p_split->pin_base,
+				       p_split->pin_count);
+		sm_config_set_clkdiv_int_frac(&p_split->sm.sm_config, CLK_DIV, 0);
+		sm_config_set_fifo_join(&p_split->sm.sm_config, PIO_FIFO_JOIN_TX);
+		sm_config_set_wrap(&p_split->sm.sm_config,
+				   p_split->sm.inital_pc + p_split->sm.wrap_target,
+				   p_split->sm.inital_pc + p_split->sm.wrap);
+		sm_config_set_out_shift(&p_split->sm.sm_config, true, true,
 					p_split->pin_count + p_split->pin_discarded);
 
 		if (i == 0) {
-			sm_config_set_sideset(&sm_config, SIDESET_BIT_COUNT, true, false);
-			sm_config_set_sideset_pins(&sm_config, dev_cfg->cs.pin);
+			sm_config_set_sideset(&p_split->sm.sm_config, SIDESET_BIT_COUNT, true,
+					      false);
+			sm_config_set_sideset_pins(&p_split->sm.sm_config, dev_cfg->cs.pin);
+		} else {
+			sm_config_set_jmp_pin(&p_split->sm.sm_config, dev_cfg->cmd_data.pin);
 		}
 
-		rc = pio_sm_init(data->pio, p_split->sm.sm, offset, &sm_config);
+		rc = pio_sm_init(data->pio, p_split->sm.sm, p_split->sm.inital_pc,
+				 &p_split->sm.sm_config);
 		if (rc < 0) {
 			return rc;
 		}
@@ -380,6 +389,10 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 			return rc;
 		}
 	}
+
+	// start and stop to bring pins in correct init state
+	pio_sm_set_enabled(data->pio, data->split[0].sm.sm, true);
+	pio_sm_set_enabled(data->pio, data->split[0].sm.sm, false);
 
 	return 0;
 }
@@ -426,11 +439,24 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 	case MIPI_DBI_MODE_8080_BUS_9_BIT:
 	case MIPI_DBI_MODE_8080_BUS_16_BIT:
 		pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
+		pio_restart_sm_mask(data->pio, data->sm_mask);
+
+		static volatile uint8_t pc[4];
+		static volatile uint count[4];
+
+		for (int i = 0; i < data->split_count; ++i) {
+			pc[i] = pio_sm_get_pc(data->pio, data->split[i].sm.sm);
+			count[i] = pio_sm_get_tx_fifo_level(data->pio, data->split[i].sm.sm);
+			LOG_DBG("%u, pc %u, count: %u", i, pc[i], count[i]);
+		}
 
 		// put length into fifo
-		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len - 1);
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len == 0 ? 0 : len - 1);
 
 		k_msgq_purge(config->msq_dma);
+
+		// put cmd_present into fifo
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, cmd_present ? 1 : 0);
 
 		for (int i = 0; i < data->split_count; ++i) {
 			if (cmd_present) {
@@ -459,6 +485,11 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 		}
 
 		mipi_dbi_pico_pio_wait_end_of_transmission(data);
+
+		for (int i = 0; i < data->split_count; ++i) {
+			pio_sm_init(data->pio, data->split[i].sm.sm, data->split[i].sm.inital_pc,
+				    &data->split[i].sm.sm_config);
+		}
 
 		break;
 

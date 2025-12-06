@@ -32,6 +32,20 @@ ZTEST(mipi_dbi_rpi_pico_pio, test_mipi_dbi_command_write)
 	}
 }
 
+ZTEST(mipi_dbi_rpi_pico_pio, test_mipi_dbi_command_write_cmd_only)
+{
+	int rslt;
+	struct mipi_dbi_config config;
+
+	uint8_t cmd = 0xff;
+
+	for (int i = 0; i < ARRAY_SIZE(modes); ++i) {
+		config.mode = modes[i];
+		rslt = mipi_dbi_command_write(mipi_dev, &config, cmd, NULL, 0);
+		zassert_equal(rslt, 0, "Expected 0 but was %u", rslt);
+	}
+}
+
 ZTEST(mipi_dbi_rpi_pico_pio, test_mipi_dbi_write_display)
 {
 	int rslt;
@@ -44,7 +58,7 @@ ZTEST(mipi_dbi_rpi_pico_pio, test_mipi_dbi_write_display)
 
 	for (int i = 0; i < ARRAY_SIZE(modes); ++i) {
 		config.mode = modes[i];
-		rslt = mipi_dbi_write_display(mipi_dev, &config, NULL, &descriptor,
+		rslt = mipi_dbi_write_display(mipi_dev, &config, data, &descriptor,
 					      PIXEL_FORMAT_RGB_565);
 		zassert_equal(rslt, 0, "Expected 0 but was %u", rslt);
 	}
