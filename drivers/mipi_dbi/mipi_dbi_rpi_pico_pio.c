@@ -100,6 +100,7 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
  *		pull ifempty [1] side 4
  *		out pins, 1 [1] side 0
  *		jmp !X end [1] side 4 ; data length == 0, jmp to "end"
+ *		jmp x-- data ; to handle length == 1 as we cannot do len - 1 as this would cause it to jump to end
  *	data:
  *		pull ifempty [1] side 6
  *		out pins, 1 side 2
@@ -108,18 +109,19 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
  *		irq 0 [1] side 6
  */
 #define SET_BASE_SM_PROGRAM_OPTIMIZED(sm_index)                                                    \
-	CONFIG_SM_PROGRAM(0, 0, 10, 11)                                                            \
+	CONFIG_SM_PROGRAM(0, 0, 11, 12)                                                            \
 	SET_INSTR(0, 0x9ee0);                                                                      \
 	SET_INSTR(1, 0x6020);                                                                      \
 	SET_INSTR(2, BIT_COUNT(DELAY_SIDESET(0x7040, 1, 3, SIDE(1, 1), 0), split->pin_count));     \
 	SET_INSTR(3, 0x0067);                                                                      \
 	SET_INSTR(4, DELAY_SIDESET(0x90e0, 1, 3, SIDE(1, 0), 1));                                  \
 	SET_INSTR(5, BIT_COUNT(DELAY_SIDESET(0x7100, 1, 3, SIDE(0, 0), 1), split->pin_count));     \
-	SET_INSTR(6, DELAY_SIDESET(0x102a, 1, 3, SIDE(1, 0), 1));                                  \
-	SET_INSTR(7, DELAY_SIDESET(0x90e0, 1, 3, SIDE(1, 1), 1));                                  \
-	SET_INSTR(8, BIT_COUNT(DELAY_SIDESET(0x7000, 1, 3, SIDE(0, 1), 0), split->pin_count));     \
-	SET_INSTR(9, 0x0047);                                                                      \
-	SET_INSTR(10, DELAY_SIDESET(0xd000, 1, 3, SIDE(1, 1), 1));
+	SET_INSTR(6, DELAY_SIDESET(0x102b, 1, 3, SIDE(1, 0), 1));                                  \
+        SET_INSTR(7, DELAY_SIDESET(0x102b, 1, 3, SIDE(1, 1), 0));                                                                      \
+	SET_INSTR(8, 0x80e0);                                  \
+	SET_INSTR(9, BIT_COUNT(DELAY_SIDESET(0x7000, 1, 3, SIDE(0, 1), 0), split->pin_count));     \
+	SET_INSTR(10, 0x0047);                                                                      \
+	SET_INSTR(11, DELAY_SIDESET(0xd000, 1, 3, SIDE(1, 1), 1));
 
 /*
  * 	.side_set 1 opt
@@ -175,7 +177,7 @@ struct mipi_dbi_pico_pio_sm {
 	uint32_t wrap;
 	uint32_t wrap_target;
 	struct pio_program program;
-	uint16_t program_instructions[11];
+	uint16_t program_instructions[12];
 };
 
 struct mipi_dbi_pico_pio_split {
@@ -470,17 +472,8 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 		pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
 		pio_restart_sm_mask(data->pio, data->sm_mask);
 
-		static volatile uint8_t pc[4];
-		static volatile uint count[4];
-
-		for (int i = 0; i < data->split_count; ++i) {
-			pc[i] = pio_sm_get_pc(data->pio, data->split[i].sm.sm);
-			count[i] = pio_sm_get_tx_fifo_level(data->pio, data->split[i].sm.sm);
-			LOG_DBG("%u, pc %u, count: %u", i, pc[i], count[i]);
-		}
-
 		// put length into fifo
-		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len == 0 ? 0 : len - 1);
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len );
 
 		k_msgq_purge(config->msq);
 
