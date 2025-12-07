@@ -34,6 +34,18 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
 #define SIDESET_BIT_COUNT 4
 #define PIO_INTERRUPT_NUM 0
 
+#define SET_INSTR(idx, value) split->sm.program_instructions[idx] = value;
+#define SIDE(wr, dc)          (wr * (1 << split->wr_pos) + dc * (1 << split->dc_pos))
+
+// update Bit count of instruction
+#define DELETE_BITS(value, mask, lsb) (value & ~(mask << lsb))
+#define SET_BITS(bits_val, lsb)       (bits_val << lsb) // add mask to its guarded
+
+#define BIT_COUNT(value, bit_count) ((value & ~0x1f) | (bit_count & 0x1f))
+#define DELAY_SIDESET(value, opt, side_set, side, delay)                                           \
+	(DELETE_BITS(value, 0x1f, 8) | SET_BITS(opt, 12) | SET_BITS(side, 13 - opt - side_set) |    \
+	 SET_BITS(delay, 8))
+
 #define CONFIG_SM_PROGRAM(sm_index, _wrap_target, _wrap, _length)                                  \
 	split = &splits[sm_index];                                                                 \
 	split->pin_discarded = 0;                                                                  \
@@ -93,21 +105,21 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
  *		out pins, 1 side 2
  *		jmp x-- data    ; repeat until data length == 0
  *	end:
- *		irq 0 side 6 [1]
+ *		irq 0 [1] side 6
  */
 #define SET_BASE_SM_PROGRAM_OPTIMIZED(sm_index)                                                    \
 	CONFIG_SM_PROGRAM(0, 0, 10, 11)                                                            \
-	split->sm.program_instructions[0] = 0x9ee0;                                                \
-	split->sm.program_instructions[1] = 0x6020;                                                \
-	split->sm.program_instructions[2] = 0x7c40 | split->pin_count;                             \
-	split->sm.program_instructions[3] = 0x0067;                                                \
-	split->sm.program_instructions[4] = 0x99e0;                                                \
-	split->sm.program_instructions[5] = 0x7100 | split->pin_count;                             \
-	split->sm.program_instructions[6] = 0x192a;                                                \
-	split->sm.program_instructions[7] = 0x9de0;                                                \
-	split->sm.program_instructions[8] = 0x7400 | split->pin_count;                             \
-	split->sm.program_instructions[9] = 0x0047;                                                \
-	split->sm.program_instructions[10] = 0xdd00;
+	SET_INSTR(0, 0x9ee0);                                                                      \
+	SET_INSTR(1, 0x6020);                                                                      \
+	SET_INSTR(2, BIT_COUNT(DELAY_SIDESET(0x7040, 1, 3, SIDE(1, 1), 0), split->pin_count));     \
+	SET_INSTR(3, 0x0067);                                                                      \
+	SET_INSTR(4, DELAY_SIDESET(0x90e0, 1, 3, SIDE(1, 0), 1));                                  \
+	SET_INSTR(5, BIT_COUNT(DELAY_SIDESET(0x7100, 1, 3, SIDE(0, 0), 1), split->pin_count));     \
+	SET_INSTR(6, DELAY_SIDESET(0x102a, 1, 3, SIDE(1, 0), 1));                                  \
+	SET_INSTR(7, DELAY_SIDESET(0x90e0, 1, 3, SIDE(1, 1), 1));                                  \
+	SET_INSTR(8, BIT_COUNT(DELAY_SIDESET(0x7000, 1, 3, SIDE(0, 1), 0), split->pin_count));     \
+	SET_INSTR(9, 0x0047);                                                                      \
+	SET_INSTR(10, DELAY_SIDESET(0xd000, 1, 3, SIDE(1, 1), 1));
 
 /*
  * 	.side_set 1 opt
@@ -170,6 +182,8 @@ struct mipi_dbi_pico_pio_split {
 	uint8_t pin_count;
 	int pin_base;
 	int pin_discarded;
+	uint8_t dc_pos;
+	uint8_t wr_pos;
 	const struct device *port;
 	struct mipi_dbi_pico_pio_sm sm;
 	struct mipi_dbi_pico_pio_dma dma;
@@ -345,6 +359,8 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 		return -EPROTO;
 	}
 
+	data->split[0].wr_pos = 2;
+	data->split[0].dc_pos = 1;
 	mipi_dbi_pio_configure_program(data->split, data->split_count);
 
 	if (gpio_is_ready_dt(&dev_cfg->wr)) {
