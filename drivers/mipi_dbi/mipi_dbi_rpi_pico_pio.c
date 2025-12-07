@@ -34,16 +34,16 @@ LOG_MODULE_REGISTER(mipi_dbi_pico_pio, CONFIG_MIPI_DBI_LOG_LEVEL);
 #define SIDESET_BIT_COUNT 4
 #define PIO_INTERRUPT_NUM 0
 
-#define SET_INSTR(idx, value) split->sm.program_instructions[idx] = value;
-#define SIDE(wr, dc)          (wr * (1 << split->wr_pos) + dc * (1 << split->dc_pos))
+#define SET_INSTR(idx, value) split->sm.program_instructions[idx] = (value);
+#define SIDE(wr, dc)          ((wr) * (1 << split->wr_pos) + (dc) * (1 << split->dc_pos))
 
 // update Bit count of instruction
-#define DELETE_BITS(value, mask, lsb) (value & ~(mask << lsb))
-#define SET_BITS(bits_val, lsb)       (bits_val << lsb) // add mask to its guarded
+#define DELETE_BITS(value, mask, lsb) ((value) & ~((mask) << (lsb)))
+#define SET_BITS(bits_val, lsb)       ((bits_val) << (lsb)) // add mask to its guarded
 
 #define BIT_COUNT(value, bit_count) ((value & ~0x1f) | (bit_count & 0x1f))
 #define DELAY_SIDESET(value, opt, side_set, side, delay)                                           \
-	(DELETE_BITS(value, 0x1f, 8) | SET_BITS(opt, 12) | SET_BITS(side, 13 - opt - side_set) |    \
+	(DELETE_BITS(value, 0x1f, 8) | SET_BITS(opt, 12) | SET_BITS(side, 13 - (opt) - (side_set)) |    \
 	 SET_BITS(delay, 8))
 
 #define CONFIG_SM_PROGRAM(sm_index, _wrap_target, _wrap, _length)                                  \
@@ -360,7 +360,7 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 	}
 
 	data->split[0].wr_pos = 2;
-	data->split[0].dc_pos = 1;
+	data->split[0].dc_pos = 0;
 	mipi_dbi_pio_configure_program(data->split, data->split_count);
 
 	if (gpio_is_ready_dt(&dev_cfg->wr)) {
@@ -394,7 +394,7 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 
 		if (i == 0) {
 			rc = pio_sm_set_consecutive_pindirs(data->pio, p_split->sm.sm,
-							    dev_cfg->cs.pin, 3, true);
+							    dev_cfg->cmd_data.pin, 3, true);
 			if (rc < 0) {
 				return rc;
 			}
@@ -417,7 +417,7 @@ static int mipi_dbi_pio_configure(const struct device *dev)
 		if (i == 0) {
 			sm_config_set_sideset(&p_split->sm.sm_config, SIDESET_BIT_COUNT, true,
 					      false);
-			sm_config_set_sideset_pins(&p_split->sm.sm_config, dev_cfg->cs.pin);
+			sm_config_set_sideset_pins(&p_split->sm.sm_config, dev_cfg->cmd_data.pin);
 		} else {
 			sm_config_set_jmp_pin(&p_split->sm.sm_config, dev_cfg->cmd_data.pin);
 		}
