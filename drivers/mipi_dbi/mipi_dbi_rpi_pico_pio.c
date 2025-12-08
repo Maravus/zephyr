@@ -469,16 +469,10 @@ static int mipi_dbi_pico_pio_write_helper(const struct device *dev,
 	case MIPI_DBI_MODE_8080_BUS_8_BIT:
 	case MIPI_DBI_MODE_8080_BUS_9_BIT:
 	case MIPI_DBI_MODE_8080_BUS_16_BIT:
-		pio_set_sm_mask_enabled(data->pio, data->sm_mask, false);
-		pio_restart_sm_mask(data->pio, data->sm_mask);
-
-		// put length into fifo
-		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len );
-
 		k_msgq_purge(config->msq);
 
-		// put cmd_present into fifo
-		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, cmd_present ? 1 : 0);
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, len );
+		pio_sm_put_blocking(data->pio, data->split[0].sm.sm, cmd_present);
 
 		for (int i = 0; i < data->split_count; ++i) {
 			if (cmd_present) {
